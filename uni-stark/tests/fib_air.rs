@@ -3,17 +3,19 @@ use std::borrow::Borrow;
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
 use p3_baby_bear::BabyBear;
 use p3_challenger::{HashChallenger, SerializingChallenger32};
-use p3_commit::ExtensionMmcs;
+use p3_commit::{ExtensionMmcs, Pcs, PolynomialSpace};
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
-use p3_field::{AbstractField, PrimeField64};
+use p3_field::{AbstractField, Field, PrimeField64};
 use p3_fri::{FriConfig, TwoAdicFriPcs};
 use p3_keccak::Keccak256Hash;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_maybe_rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use p3_merkle_tree::FieldMerkleTreeMmcs;
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher32};
-use p3_uni_stark::{prove, verify, StarkConfig};
+use rand::random;
+use tracing::info_span;
 use tracing_forest::util::LevelFilter;
 use tracing_forest::ForestLayer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -105,9 +107,9 @@ impl<F> Borrow<FibonacciRow<F>> for [F] {
     }
 }
 
-// RUST_LOG=debug RUSTFLAGS=-Ctarget-cpu=native cargo t --release test_public_value -- --nocapture --exact
+// RUST_LOG=debug RUSTFLAGS=-Ctarget-cpu=native cargo t --release bench_trace_commit -- --nocapture --exact
 #[test]
-fn test_public_value() {
+fn bench_trace_commit() {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
@@ -139,29 +141,27 @@ fn test_public_value() {
 
     type Challenger = SerializingChallenger32<Val, HashChallenger<u8, ByteHash, 32>>;
 
-    let trace = generate_trace_rows::<Val>(Val::zero(), Val::one(), 1 << 20);
+    let num_rows = 1 << 20;
+    let num_cols = 32;
+    let trace_vals: Vec<_> = (0..num_rows * num_cols)
+        .into_par_iter()
+        .map(|_| Val::from_wrapped_u32(random::<u32>()))
+        .collect();
+
+    let trace = RowMajorMatrix::new(trace_vals, num_cols);
     let fri_config = FriConfig {
         log_blowup: 1,
         num_queries: 103,
         proof_of_work_bits: 0,
         mmcs: challenge_mmcs,
     };
-    type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
-    let pcs = Pcs::new(dft, val_mmcs, fri_config);
+    type MyPcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
+    let pcs = MyPcs::new(dft, val_mmcs, fri_config);
 
-    type MyConfig = StarkConfig<Pcs, Challenge, Challenger>;
-    let config = MyConfig::new(pcs);
-
-    let mut challenger = Challenger::from_hasher(vec![], byte_hash);
-    let pis = vec![
-        BabyBear::from_canonical_u64(0),
-        BabyBear::from_canonical_u64(1),
-        *trace.values.last().unwrap(),
-    ];
-    let proof = prove(&config, &FibonacciAir {}, &mut challenger, trace, &pis);
-
-    let mut challenger = Challenger::from_hasher(vec![], byte_hash);
-    verify(&config, &FibonacciAir {}, &mut challenger, &proof, &pis).expect("verification failed");
+    assert_eq!(trace.height(), num_rows);
+    let trace_domain = Pcs::<Challenge, Challenger>::natural_domain_for_degree(&pcs, num_rows);
+    let (trace_commit, trace_data) = info_span!("commit to trace data")
+        .in_scope(|| Pcs::<Challenge, Challenger>::commit(&pcs, vec![(trace_domain, trace)]));
 }
 
 // #[cfg(debug_assertions)]
