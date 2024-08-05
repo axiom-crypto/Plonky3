@@ -15,6 +15,11 @@ use p3_poseidon2::{Poseidon2, Poseidon2ExternalMatrixGeneral};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_uni_stark::{prove, verify, StarkConfig};
 use rand::thread_rng;
+use tracing_forest::util::LevelFilter;
+use tracing_forest::ForestLayer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Registry};
 
 /// For testing the public values feature
 
@@ -56,7 +61,7 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for FibonacciAir {
     }
 }
 
-pub fn generate_trace_rows<F: PrimeField64>(a: u64, b: u64, n: usize) -> RowMajorMatrix<F> {
+pub fn generate_trace_rows<F: PrimeField64>(a: F, b: F, n: usize) -> RowMajorMatrix<F> {
     assert!(n.is_power_of_two());
 
     let mut trace =
@@ -67,7 +72,7 @@ pub fn generate_trace_rows<F: PrimeField64>(a: u64, b: u64, n: usize) -> RowMajo
     assert!(suffix.is_empty(), "Alignment should match");
     assert_eq!(rows.len(), n);
 
-    rows[0] = FibonacciRow::new(F::from_canonical_u64(a), F::from_canonical_u64(b));
+    rows[0] = FibonacciRow::new(a, b);
 
     for i in 1..n {
         rows[i].left = rows[i - 1].right;
@@ -114,8 +119,18 @@ type Dft = Radix2DitParallel;
 type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
 type MyConfig = StarkConfig<Pcs, Challenge, Challenger>;
 
+// RUST_LOG=debug RUSTFLAGS=-Ctarget-cpu=native cargo t --release test_public_value -- --nocapture --exact
 #[test]
 fn test_public_value() {
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+
+    Registry::default()
+        .with(env_filter)
+        .with(ForestLayer::default())
+        .init();
+
     let perm = Perm::new_from_rng_128(
         Poseidon2ExternalMatrixGeneral,
         DiffusionMatrixBabyBear::default(),
@@ -126,11 +141,11 @@ fn test_public_value() {
     let val_mmcs = ValMmcs::new(hash, compress);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft {};
-    let trace = generate_trace_rows::<Val>(0, 1, 1 << 3);
+    let trace = generate_trace_rows::<Val>(Val::zero(), Val::one(), 1 << 20);
     let fri_config = FriConfig {
-        log_blowup: 2,
-        num_queries: 28,
-        proof_of_work_bits: 8,
+        log_blowup: 1,
+        num_queries: 103,
+        proof_of_work_bits: 0,
         mmcs: challenge_mmcs,
     };
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
@@ -139,7 +154,7 @@ fn test_public_value() {
     let pis = vec![
         BabyBear::from_canonical_u64(0),
         BabyBear::from_canonical_u64(1),
-        BabyBear::from_canonical_u64(21),
+        *trace.values.last().unwrap(),
     ];
     let proof = prove(&config, &FibonacciAir {}, &mut challenger, trace, &pis);
     let mut challenger = Challenger::new(perm);
@@ -166,7 +181,7 @@ fn test_incorrect_public_value() {
         proof_of_work_bits: 8,
         mmcs: challenge_mmcs,
     };
-    let trace = generate_trace_rows::<Val>(0, 1, 1 << 3);
+    let trace = generate_trace_rows::<Val>(Val::zero(), Val::one(), 1 << 3);
     let pcs = Pcs::new(dft, val_mmcs, fri_config);
     let config = MyConfig::new(pcs);
     let mut challenger = Challenger::new(perm.clone());
