@@ -1,8 +1,8 @@
 use std::borrow::Borrow;
 
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
-use p3_baby_bear::BabyBear;
-use p3_challenger::{HashChallenger, SerializingChallenger32};
+use p3_baby_bear::{BabyBear, DiffusionMatrixBabyBear};
+use p3_challenger::{DuplexChallenger, HashChallenger, SerializingChallenger32};
 use p3_commit::{ExtensionMmcs, Pcs, PolynomialSpace};
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
@@ -13,8 +13,11 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use p3_maybe_rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use p3_merkle_tree::FieldMerkleTreeMmcs;
-use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher32};
-use rand::random;
+use p3_poseidon2::{Poseidon2, Poseidon2ExternalMatrixGeneral};
+use p3_symmetric::{
+    CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher32, TruncatedPermutation,
+};
+use rand::{random, thread_rng};
 use tracing::info_span;
 use tracing_forest::util::LevelFilter;
 use tracing_forest::ForestLayer;
@@ -122,16 +125,27 @@ fn bench_trace_commit() {
     type Val = BabyBear;
     type Challenge = BinomialExtensionField<Val, 4>;
 
-    type ByteHash = Keccak256Hash;
-    type FieldHash = SerializingHasher32<ByteHash>;
-    let byte_hash = ByteHash {};
-    let field_hash = FieldHash::new(Keccak256Hash {});
+    type Perm = Poseidon2<Val, Poseidon2ExternalMatrixGeneral, DiffusionMatrixBabyBear, 16, 7>;
+    let perm = Perm::new_from_rng_128(
+        Poseidon2ExternalMatrixGeneral,
+        DiffusionMatrixBabyBear::default(),
+        &mut thread_rng(),
+    );
 
-    type MyCompress = CompressionFunctionFromHasher<u8, ByteHash, 2, 32>;
-    let compress = MyCompress::new(byte_hash);
+    type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+    let hash = MyHash::new(perm.clone());
 
-    type ValMmcs = FieldMerkleTreeMmcs<Val, u8, FieldHash, MyCompress, 32>;
-    let val_mmcs = ValMmcs::new(field_hash, compress);
+    type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+    let compress = MyCompress::new(perm.clone());
+
+    type ValMmcs = FieldMerkleTreeMmcs<
+        <Val as Field>::Packing,
+        <Val as Field>::Packing,
+        MyHash,
+        MyCompress,
+        8,
+    >;
+    let val_mmcs = ValMmcs::new(hash, compress);
 
     type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
@@ -139,7 +153,7 @@ fn bench_trace_commit() {
     type Dft = Radix2DitParallel;
     let dft = Dft {};
 
-    type Challenger = SerializingChallenger32<Val, HashChallenger<u8, ByteHash, 32>>;
+    type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
 
     let num_rows = 1 << 20;
     let num_cols = 32;
