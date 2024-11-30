@@ -117,41 +117,32 @@ mod tests {
     use alloc::vec;
 
     use itertools::Itertools;
-    use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+    use p3_baby_bear::BabyBear;
     use p3_commit::Mmcs;
     use p3_field::{Field, FieldAlgebra};
     use p3_matrix::dense::RowMajorMatrix;
     use p3_matrix::{Dimensions, Matrix};
-    use p3_poseidon2::ExternalLayerConstants;
+    use p3_sha256::Sha256;
     use p3_symmetric::{
-        CryptographicHasher, PaddingFreeSponge, PseudoCompressionFunction, TruncatedPermutation,
+        CompressionFunctionFromHasher, CryptographicHasher, PseudoCompressionFunction,
+        SerializingHasher32,
     };
-    use rand::distributions::Standard;
-    use rand::rngs::StdRng;
-    use rand::{thread_rng, Rng, SeedableRng};
 
     use crate::mmcs::MerkleTreeMmcs;
     use crate::unoptimized_merkle_tree::UnoptimizedMerkleTree;
 
     type F = BabyBear;
 
-    type Perm = Poseidon2BabyBear<16>;
-    type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
-    type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+    type MyHash = SerializingHasher32<Sha256>;
+    type MyCompress = CompressionFunctionFromHasher<Sha256, 2, 32>;
+
     // Actual plonky3 MMCS to test against:
-    type MyMmcs =
-        MerkleTreeMmcs<<F as Field>::Packing, <F as Field>::Packing, MyHash, MyCompress, 8>;
+    type MyMmcs = MerkleTreeMmcs<F, u8, MyHash, MyCompress, 32>;
 
     #[test]
     fn commit_single_1x8() {
-        let mut rng = StdRng::seed_from_u64(0);
-        let (rounds_f, rounds_p) = (8, 13);
-        let external_constants = ExternalLayerConstants::new_from_rng(rounds_f, &mut rng);
-        let internal_constants = rng.sample_iter(Standard).take(rounds_p).collect();
-        let perm = Poseidon2BabyBear::new(external_constants, internal_constants);
-
-        let hash = MyHash::new(perm.clone());
-        let compress = MyCompress::new(perm);
+        let hash = MyHash::new(Sha256);
+        let compress = MyCompress::new(Sha256);
         let mmcs = MyMmcs::new(hash.clone(), compress.clone());
 
         // v = [2, 1, 2, 2, 0, 0, 1, 0]
@@ -174,14 +165,8 @@ mod tests {
 
     #[test]
     fn commit_mixed() {
-        let mut rng = StdRng::seed_from_u64(0);
-        let (rounds_f, rounds_p) = (8, 13);
-        let external_constants = ExternalLayerConstants::new_from_rng(rounds_f, &mut rng);
-        let internal_constants = rng.sample_iter(Standard).take(rounds_p).collect();
-        let perm = Poseidon2BabyBear::new(external_constants, internal_constants);
-
-        let hash = MyHash::new(perm.clone());
-        let compress = MyCompress::new(perm);
+        let hash = MyHash::new(Sha256);
+        let compress = MyCompress::new(Sha256);
         let mmcs = MyMmcs::new(hash.clone(), compress.clone());
         let default_digest = [F::ZERO; 8];
 
@@ -192,40 +177,38 @@ mod tests {
         //   2 1
         //   2 2
         // ]
-        let mat_1 = RowMajorMatrix::new(
-            vec![
-                F::ZERO,
-                F::ONE,
-                F::TWO,
-                F::ONE,
-                F::TWO,
-                F::TWO,
-                F::TWO,
-                F::ONE,
-                F::TWO,
-                F::TWO,
-            ],
-            2,
-        );
+        let mut mat_1 = vec![
+            F::ZERO,
+            F::ONE,
+            F::TWO,
+            F::ONE,
+            F::TWO,
+            F::TWO,
+            F::TWO,
+            F::ONE,
+            F::TWO,
+            F::TWO,
+        ];
+        mat_1.resize(8 * 2, F::ZERO);
+        let mat_1 = RowMajorMatrix::new(mat_1, 2);
         // mat_2 = [
         //   1 2 1
         //   0 2 2
         //   1 2 1
         // ]
-        let mat_2 = RowMajorMatrix::new(
-            vec![
-                F::ONE,
-                F::TWO,
-                F::ONE,
-                F::ZERO,
-                F::TWO,
-                F::TWO,
-                F::ONE,
-                F::TWO,
-                F::ONE,
-            ],
-            3,
-        );
+        let mut mat_2 = vec![
+            F::ONE,
+            F::TWO,
+            F::ONE,
+            F::ZERO,
+            F::TWO,
+            F::TWO,
+            F::ONE,
+            F::TWO,
+            F::ONE,
+        ];
+        mat_2.resize(4 * 3, F::ZERO);
+        let mat_2 = RowMajorMatrix::new(mat_2, 3);
 
         let matrices = vec![mat_1, mat_2];
         let (expected_commit, _) = mmcs.commit(matrices.clone());
