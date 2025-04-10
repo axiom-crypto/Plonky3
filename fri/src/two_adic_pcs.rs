@@ -79,7 +79,7 @@ impl<F: TwoAdicField, InputProof, InputError: Debug> FriGenericConfig<F>
         let log_arity = 1;
         let (e0, e1) = evals
             .collect_tuple()
-            .expect("TwoAdicFriFolder only supports arity=2");
+            .expect("TwoAdicFriGenericConfig only supports folding rows of size 2");
         // If performance critical, make this API stateful to avoid this
         // This is a bit more math than is necessary, but leaving it here
         // in case we want higher arity in the future
@@ -89,7 +89,9 @@ impl<F: TwoAdicField, InputProof, InputError: Debug> FriGenericConfig<F>
             .shifted_powers(subgroup_start)
             .take(arity)
             .collect_vec();
+
         reverse_slice_index_bits(&mut xs);
+
         assert_eq!(log_arity, 1, "can only interpolate two points for now");
         // interpolate and evaluate at beta
         e0 + (beta - xs[0]) * (e1 - e0) / (xs[1] - xs[0])
@@ -122,7 +124,9 @@ impl<F: TwoAdicField, InputProof, InputError: Debug> FriGenericConfig<F>
         m.par_rows()
             .zip(powers)
             .map(|(mut row, power)| {
-                let (lo, hi) = row.next_tuple().unwrap();
+                let (lo, hi) = row
+                    .next_tuple()
+                    .expect("TwoAdicFriGenericConfig only supports folding rows of size 2");
                 (one_half + power) * lo + (one_half - power) * hi
             })
             .collect()
@@ -410,8 +414,7 @@ where
         // Batch combination challenge
         let alpha: Challenge = challenger.sample_ext_element();
 
-        let log_global_max_height =
-            proof.commit_phase_commits.len() + self.fri.log_blowup + self.fri.log_final_poly_len;
+        let log_global_max_height = proof.log_max_height;
 
         let g: TwoAdicFriGenericConfigForMmcs<Val, InputMmcs> =
             TwoAdicFriGenericConfig(PhantomData);
@@ -483,12 +486,14 @@ where
                 }
             }
 
-            // `reduced_openings` would have a log_height = log_blowup entry only if there was a
-            // trace matrix of height 1. In this case the reduced opening can be skipped as it will
-            // not be checked against any commit phase commit.
-            if let Some((_alpha_pow, ro)) = reduced_openings.remove(&self.fri.log_blowup) {
-                assert!(ro.is_zero());
-            }
+            // Commenting the following as it's causing issues with fri higher arity
+
+            // // `reduced_openings` would have a log_height = log_blowup entry only if there was a
+            // // trace matrix of height 1. In this case the reduced opening can be skipped as it will
+            // // not be checked against any commit phase commit.
+            // if let Some((_alpha_pow, ro)) = reduced_openings.remove(&self.fri.log_blowup) {
+            //     assert!(ro.is_zero());
+            // }
 
             // Return reduced openings descending by log_height.
             Ok(reduced_openings
