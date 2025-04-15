@@ -29,7 +29,16 @@ p3-merkle-tree.workspace = true
 p3-poseidon2.workspace = true
 p3-symmetric.workspace = true
 criterion.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+
+tracing-subscriber = { workspace = true, features = ["std", "env-filter"] }
+tracing-forest = { workspace = true, features = ["ansi", "smallvec"] }
 
 [[bench]]
 name = "fold_even_odd"
+harness = false
+
+[[bench]]
+name = "pcs_open"
 harness = false

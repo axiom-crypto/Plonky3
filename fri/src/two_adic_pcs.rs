@@ -159,7 +159,10 @@ where
         &self,
         evaluations: Vec<(Self::Domain, RowMajorMatrix<Val>)>,
     ) -> (Self::Commitment, Self::ProverData) {
-        let ldes: Vec<_> = evaluations
+        let ldes: Vec<_> = info_span!(
+            "compute ldes"
+        ).in_scope(|| {
+            evaluations
             .into_iter()
             .map(|(domain, evals)| {
                 assert_eq!(domain.size(), evals.height());
@@ -170,9 +173,10 @@ where
                     .bit_reverse_rows()
                     .to_row_major_matrix()
             })
-            .collect();
+            .collect()
+        });
 
-        self.mmcs.commit(ldes)
+        info_span!("commit ldes").in_scope(|| self.mmcs.commit(ldes))
     }
 
     fn get_evaluations_on_domain<'a>(
@@ -270,43 +274,47 @@ where
         let inv_denoms = compute_inverse_denominators(&mats_and_points, Val::GENERATOR);
 
         // Evaluate coset representations and write openings to the challenger
-        let all_opened_values = mats_and_points
-            .iter()
-            .map(|(mats, points)| {
-                izip!(mats.iter(), points.iter())
-                    .map(|(mat, points_for_mat)| {
-                        points_for_mat
-                            .iter()
-                            .map(|&point| {
-                                let _guard =
-                                    info_span!("evaluate matrix", dims = %mat.dimensions())
-                                        .entered();
+        let all_opened_values = {
+            let _guard = info_span!("compute all opened values").entered();
+            mats_and_points
+                .iter()
+                .map(|(mats, points)| {
+                    mats.iter().zip(points.iter())
+                        .map(|(mat, points_for_mat)| {
+                            points_for_mat
+                                .iter()
+                                .map(|&point| {
+                                    let _guard =
+                                        info_span!("evaluate matrix", dims = %mat.dimensions())
+                                            .entered();
 
-                                // Use Barycentric interpolation to evaluate the matrix at the given point.
-                                let ys =
-                                    info_span!("compute opened values with Lagrange interpolation")
-                                        .in_scope(|| {
-                                            let h = mat.height() >> self.fri.log_blowup;
-                                            let (low_coset, _) = mat.split_rows(h);
-                                            let mut inv_denoms =
-                                                inv_denoms.get(&point).unwrap()[..h].to_vec();
-                                            reverse_slice_index_bits(&mut inv_denoms);
-                                            interpolate_coset(
-                                                &BitReversalPerm::new_view(low_coset),
-                                                Val::GENERATOR,
-                                                point,
-                                                Some(&inv_denoms),
-                                            )
-                                        });
-                                ys.iter()
-                                    .for_each(|&y| challenger.observe_algebra_element(y));
-                                ys
-                            })
-                            .collect_vec()
-                    })
-                    .collect_vec()
-            })
-            .collect_vec();
+                                    // Use Barycentric interpolation to evaluate the matrix at the given point.
+                                    let ys = info_span!(
+                                        "compute opened values with Lagrange interpolation"
+                                    )
+                                    .in_scope(|| {
+                                        let h = mat.height() >> self.fri.log_blowup;
+                                        let (low_coset, _) = mat.split_rows(h);
+                                        let mut inv_denoms =
+                                            inv_denoms.get(&point).unwrap()[..h].to_vec();
+                                        reverse_slice_index_bits(&mut inv_denoms);
+                                        interpolate_coset(
+                                            &BitReversalPerm::new_view(low_coset),
+                                            Val::GENERATOR,
+                                            point,
+                                            Some(&inv_denoms),
+                                        )
+                                    });
+                                    ys.iter()
+                                        .for_each(|&y| challenger.observe_algebra_element(y));
+                                    ys
+                                })
+                                .collect_vec()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect_vec()
+        };
 
         // Batch combination challenge
         // TODO: Should we be computing a different alpha for each height?
@@ -344,56 +352,60 @@ where
         // opening points `zeta` with the sum weighted by powers of alpha.
         let mut reduced_openings: [_; 32] = core::array::from_fn(|_| None);
 
-        for ((mats, points), openings_for_round) in
-            mats_and_points.iter().zip(all_opened_values.iter())
         {
-            for (mat, points_for_mat, openings_for_mat) in
-                izip!(mats.iter(), points.iter(), openings_for_round.iter())
+            let _guard = info_span!("compute reduced openings").entered();
+            for ((mats, points), openings_for_round) in
+                mats_and_points.iter().zip(all_opened_values.iter())
             {
-                let _guard =
-                    info_span!("reduce matrix quotient", dims = %mat.dimensions()).entered();
+                for (mat, points_for_mat, openings_for_mat) in
+                    izip!(mats.iter(), points.iter(), openings_for_round.iter())
+                {
+                    let _guard =
+                        info_span!("reduce matrix quotient", dims = %mat.dimensions()).entered();
 
-                let log_height = log2_strict_usize(mat.height());
+                    let log_height = log2_strict_usize(mat.height());
 
-                // If this is our first matrix at this height, initialise reduced_openings to zero.
-                // Otherwise, get a mutable reference to it.
-                let reduced_opening_for_log_height = reduced_openings[log_height]
-                    .get_or_insert_with(|| vec![Challenge::ZERO; mat.height()]);
-                debug_assert_eq!(reduced_opening_for_log_height.len(), mat.height());
+                    // If this is our first matrix at this height, initialise reduced_openings to zero.
+                    // Otherwise, get a mutable reference to it.
+                    let reduced_opening_for_log_height = reduced_openings[log_height]
+                        .get_or_insert_with(|| vec![Challenge::ZERO; mat.height()]);
+                    debug_assert_eq!(reduced_opening_for_log_height.len(), mat.height());
 
-                // Treating our matrix M as the evaluations of functions M0, M1, ...
-                // Compute the evaluations of `Mred(x) = M0(x) + alpha*M1(x) + ...`
-                let mat_compressed = info_span!("compress mat").in_scope(|| {
-                    // This will be reused for all points z which M is opened at so we collect into a vector.
-                    mat.rowwise_packed_dot_product::<Challenge>(&packed_alpha_powers)
-                        .collect::<Vec<_>>()
-                });
+                    // Treating our matrix M as the evaluations of functions M0, M1, ...
+                    // Compute the evaluations of `Mred(x) = M0(x) + alpha*M1(x) + ...`
+                    let mat_compressed = info_span!("compress mat").in_scope(|| {
+                        // This will be reused for all points z which M is opened at so we collect into a vector.
+                        mat.rowwise_packed_dot_product::<Challenge>(&packed_alpha_powers)
+                            .collect::<Vec<_>>()
+                    });
 
-                for (&point, openings) in points_for_mat.iter().zip(openings_for_mat) {
-                    // If we have multiple matrices at the same height, we need to scale mat to combine them.
-                    let alpha_pow_offset = alpha.exp_u64(num_reduced[log_height] as u64);
+                    for (&point, openings) in points_for_mat.iter().zip(openings_for_mat) {
+                        // If we have multiple matrices at the same height, we need to scale mat to combine them.
+                        let alpha_pow_offset = alpha.exp_u64(num_reduced[log_height] as u64);
 
-                    // As we have all the openings `Mi(z)`, we can combine them using `alpha`
-                    // in an identical way to before to also compute `Mred(z)`.
-                    let reduced_openings: Challenge =
-                        dot_product(alpha_powers.iter().copied(), openings.iter().copied());
+                        // As we have all the openings `Mi(z)`, we can combine them using `alpha`
+                        // in an identical way to before to also compute `Mred(z)`.
+                        let reduced_openings: Challenge =
+                            dot_product(alpha_powers.iter().copied(), openings.iter().copied());
 
-                    mat_compressed
-                        .par_iter()
-                        .zip(reduced_opening_for_log_height.par_iter_mut())
-                        // inv_denoms contains `1/(point - x)` for `x` in a coset `gK`.
-                        // If `|K| =/= mat.height()` we actually want a subset of this
-                        // corresponding to the evaluations over `gH` for `|H| = mat.height()`.
-                        // As inv_denoms is bit reversed, the evaluations over `gH` are exactly
-                        // the evaluations over `gK` at the indices `0..mat.height()`.
-                        // So zip will truncate to the desired smaller length.
-                        .zip(inv_denoms.get(&point).unwrap().par_iter())
-                        // Map the function `Mred(x) -> (Mred(z) - Mred(x))/(z - x)`
-                        // across the evaluations vector of `Mred(x)`.
-                        .for_each(|((&reduced_row, ro), &inv_denom)| {
-                            *ro += alpha_pow_offset * (reduced_openings - reduced_row) * inv_denom
-                        });
-                    num_reduced[log_height] += mat.width();
+                        mat_compressed
+                            .par_iter()
+                            .zip(reduced_opening_for_log_height.par_iter_mut())
+                            // inv_denoms contains `1/(point - x)` for `x` in a coset `gK`.
+                            // If `|K| =/= mat.height()` we actually want a subset of this
+                            // corresponding to the evaluations over `gH` for `|H| = mat.height()`.
+                            // As inv_denoms is bit reversed, the evaluations over `gH` are exactly
+                            // the evaluations over `gK` at the indices `0..mat.height()`.
+                            // So zip will truncate to the desired smaller length.
+                            .zip(inv_denoms.get(&point).unwrap().par_iter())
+                            // Map the function `Mred(x) -> (Mred(z) - Mred(x))/(z - x)`
+                            // across the evaluations vector of `Mred(x)`.
+                            .for_each(|((&reduced_row, ro), &inv_denom)| {
+                                *ro +=
+                                    alpha_pow_offset * (reduced_openings - reduced_row) * inv_denom
+                            });
+                        num_reduced[log_height] += mat.width();
+                    }
                 }
             }
         }
